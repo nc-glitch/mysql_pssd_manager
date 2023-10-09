@@ -1,0 +1,190 @@
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.backends import default_backend
+from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+import mysql.connector
+import subprocess
+import hashlib
+import base64
+
+# best source: https://www.freecodecamp.org/news/connect-python-with-sql/
+# add sql injection protection
+
+def generate_fernet_key(text):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b'safest storage!',
+        iterations=100000,
+        backend=default_backend()
+    )
+
+    # derive a key from a master password
+    text = text.encode()
+    key = kdf.derive(text)
+    key = base64.b64encode(key)
+    return Fernet(key)
+
+def alpha_hash(hash_text):
+    hashed = base64.b32encode(hash_text)
+    hashed = hashed.decode('ascii').rstrip('=')
+    return hashed.lower()
+
+def hash_text(text):
+    salt = 'iRmh94OX5H'
+    salt = salt.encode()
+    salted_text = salt + text.encode()
+    hashed = hashlib.sha256(salted_text).digest()
+    return alpha_hash(hashed)
+
+def list_tables(cursor):
+    cursor.execute(f'SHOW TABLES;')
+    tables_it = cursor.fetchall()
+    tables = [ table[0] for table in tables_it ]
+    print(tables)
+    return tables
+
+class Table:
+    __LOGIN_TEST = 'Successfully Logged In!'
+    def add_entry(self, pssd, name='', url='', description='', usr=''):
+        values = (name, url, description, usr, pssd)
+        values = (self.fern.encrypt(value.encode()) for value in values)
+        values = ( value.decode().rstrip('=') for value in values )
+        name, url, description, usr, pssd = values
+        sql = f'INSERT INTO {self.__usr_hash} (name, url, description, usr, pssd) VALUES ({name}, {url}, {description}, {usr}, {pssd});'
+        self.__cursor.execute(sql)
+        self.__connection.commit()
+
+    def __create_table(self):
+        self.__cursor.execute(f'CREATE TABLE {self.__usr_hash} ( id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), url VARCHAR(255), description VARCHAR(255), usr VARCHAR(255), pssd VARCHAR(255) NOT NULL );')
+        self.__connection.commit()
+
+        self.add_entry(name=self.__usr_hash, pssd=self.__LOGIN_TEST)
+        # add base case for logging in
+
+    def __table_exists(self):
+        tables = list_tables(self.__cursor)
+        return self.__usr_hash in tables
+
+    def get_row(self, id):
+        sql = f"SELECT * FROM {self.__usr_hash} WHERE id = {id};"
+        self.__cursor.execute(sql)
+        row = self.__cursor.fetchone()
+        return row
+
+    def login(self):
+        row = self.get_row(0)  
+        print(row)
+        if row is None:
+            return False
+        try:
+            decrypted = self.fern.decrypt(row[0])
+            if decrypted == self.__LOGIN_TEST:
+                return True
+        except InvalidToken: pass
+        return False
+
+        
+    def __init__(self, db_name, usr, pssd, cursor, connection):
+        self.__db_name = db_name
+        self.__usr_hash = hash_text(usr)
+        self.fern = generate_fernet_key(pssd)
+        self.__cursor = cursor
+        self.__connection = connection
+        
+        # creating table
+        if self.__table_exists():
+            if not self.login():
+                del self
+        else:
+            self.__create_table()
+               
+    def remove_nones(**kargs):
+        return { key: value for key, value in kargs.items() if value != None}
+
+    def query(self, url=None, name=None, description=None, usr=None, pssd=None):
+        search = f"SELECT * FROM {self.__usr_hash} WHERE"
+
+        entry_vals = { 'url': url, 'name': name, 'description': description, 'usr': usr, 'pssd': pssd }
+        entry_vals = { key: value for key, value in entry_vals.items() if value != None }
+        if entry_vals:
+            for key, value in entry_vals.items():
+                operator = '='
+                if key == 'description':
+                    operator = 'LIKE'
+                search += f' {key} {operator} {value} AND'
+            search = search[:-4]
+        search += ';'
+
+        self.__cursor.execute(search)
+        results_it = self.__cursor.fetchall()
+
+        results = [ result for result in results_it ]
+        return results
+        
+
+    def delete(self, url=None, name=None, description=None, usr=None, pssd=None):
+        results = self.query(url=url, name=name, description=description, usr=usr, pssd=pssd)
+        sql = 'DELETE FROM customers WHERE id IN (%s);'
+        values = [(result[0],) for result in results]
+        self.__cursor.executemany(sql, values)
+        self.__connection.commit()
+
+    def edit(self, url=None, name=None, description=None, usr=None, pssd=None,
+             new_url=None, new_name=None, new_description=None, new_usr=None, new_pssd=None):
+        results = self.query(url=url, name=name, description=description, usr=usr, pssd=pssd)
+        if len(results) != 1:
+            return False
+        entry = { 'url': new_url, 'name': new_name, 'description': new_description, 
+                 'usr': new_usr, 'pssd': new_pssd }
+        entry = { key: value for key, value in entry.items() if value != None }
+        sql = 'UPDATE {self.__usr_hash} SET '
+        for key, value in entry.items():
+            sql += f"{key} = {value}, "
+        sql = sql[:-2] + f' WHERE id = {results[0][0]}'
+        return True
+
+
+class LoginDB:
+    def connect_to_db(self, db_name):
+        self.__connection = mysql.connector.connect(
+            user='root',
+            host='localhost',
+            database=db_name
+        )
+        self.__cursor = self.__connection.cursor()
+
+
+    def __init__(self, db_name, admin_usr, admin_pssd):
+        self.db_name = db_name
+        try:
+            self.connect_to_db(db_name)
+        except mysql.connector.errors.ProgrammingError as e:
+            if 'Unknown database' in str(e):
+                connection = mysql.connector.connect(
+                    user='root',
+                    host='localhost'
+                )
+                cursor = connection.cursor()
+                cursor.execute(f'CREATE DATABASE {db_name}')
+                connection.close()
+                
+                self.connect_to_db(db_name)
+            else:
+                raise e
+
+        self.__admin_usr = admin_usr
+        self.__admin_pssd = admin_pssd
+
+    def __del__(self):
+        self.__connection.close()
+        self.__cursor.close()
+
+    def login(self, usr, pssd):
+        return Table(self.db_name, usr, pssd, self.__cursor, self.__connection)
+
+    def list_usr_hashes(self):
+        return list_tables(self.__cursor)
+
+#connection = psycopg2.connect(user="postgres", password="pynative@#29", host="127.0.0.1", port="5432", database="passwords")
+#cursor = connection.cursor()

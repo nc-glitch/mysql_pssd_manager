@@ -1,0 +1,23 @@
+MySQL DB class
+  List of Tables each one for a single user
+    Table class
+      usr encryption for all columns (maybe admin support too)
+
+      add_entry
+      
+      delete_entry
+        cannot delete first entry
+
+  Add:
+    creates Table
+    adds a single first entry used for logon verification
+
+  Delete:
+    return Table DF
+    checks first entry
+  
+  Login:
+    returns Table class
+    checks the first entry
+
+
